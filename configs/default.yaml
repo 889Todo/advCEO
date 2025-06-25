@@ -1,0 +1,16 @@
+# configs/default.yaml
+num_diffusion_steps: 1000
+patch_size: 128
+batch_size: 2
+lr: 0.0005
+epochs: 1
+data_path: "data/coco_10class"
+ann_path: "data/coco_10class/annotations"
+#categories: ["bear", "zebra", "horse", "sheep", "cow"]
+loss_weights:
+  mse: 0.15
+  adv: 0.25
+  identity: 0.6
+
+# 新增：只取前xx个样本
+max_samples: 10
