@@ -7,40 +7,70 @@ from data.coco_utils import COCOAdversarialDataset, collate_fn
 from models.diffusion_model import AdvCEODiffusion
 from models.detector import YOLODetector
 from trainers.adversarial_trainer import AdversarialTrainer
-from my_visualize import plot_threeway_comparison  # <--- 新增
+from my_visualize import plot_threeway_comparison
 
 class FilteredCOCOAdversarialDataset(COCOAdversarialDataset):
-    def __init__(self, *args, max_samples=None, **kwargs):
+    def __init__(self, *args, max_samples=None, filter_classes=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.valid_indices = []
+        self.filter_classes = filter_classes
         total_len = super().__len__()
         for idx in range(total_len):
             data = super().__getitem__(idx)
             target = data[1]
             if 'boxes' in target and hasattr(target['boxes'], 'shape') and target['boxes'].shape[0] > 0:
-                self.valid_indices.append(idx)
+                if self.filter_classes is None or any(label in self.filter_classes for label in target['labels'].tolist()):
+                    self.valid_indices.append(idx)
             if max_samples is not None and len(self.valid_indices) >= max_samples:
                 break
-        print(f"Total images: {total_len}, Valid images with targets: {len(self.valid_indices)}")
+        print(f"Total images: {total_len}, Valid images with targets in selected classes: {len(self.valid_indices)}")
 
     def __len__(self):
         return len(self.valid_indices)
 
     def __getitem__(self, idx):
         real_idx = self.valid_indices[idx]
-        return super().__getitem__(real_idx)
+        data, target = super().__getitem__(real_idx)
+        if self.filter_classes is not None:
+            mask = [i for i, label in enumerate(target['labels']) if label in self.filter_classes]
+            target['boxes'] = target['boxes'][mask]
+            target['labels'] = target['labels'][mask]
+        return data, target
+
+def get_coco_to_custom(config):
+    coco_id_map = {
+        "bear": 21,
+        "zebra": 24,
+        "car": 2,
+        "horse": 17,
+        "sheep": 19,
+        "bus": 5,
+        "cow": 20,
+        "microwave": 69,
+        "bottle": 39,
+        "couch": 57
+    }
+    user_cats = config.get('categories', list(coco_id_map.keys()))
+    coco_to_custom = {coco_id_map[name]: idx for idx, name in enumerate(user_cats) if name in coco_id_map}
+    custom_label_ids = list(coco_to_custom.keys())
+    return coco_to_custom, custom_label_ids, user_cats
 
 def main():
-    # 加载配置
     with open('configs/default.yaml', 'r', encoding='utf-8', errors='ignore') as f:
         config = yaml.safe_load(f)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    coco_to_custom, custom_label_ids, categories = get_coco_to_custom(config)
+    config['categories'] = categories
+
+    detector = YOLODetector(
+        model_name=config.get("detector", "yolov5su.pt"),
+        target_classes=categories,
+        coco_to_custom=coco_to_custom
+    )
     model = AdvCEODiffusion(config).to(device)
-    detector = YOLODetector(model_name="yolov5su.pt")
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
 
-    # 检查数据和标注路径
     ann_file = config['ann_path']
     if os.path.isdir(ann_file):
         ann_file = os.path.join(ann_file, "instances_train2017.json")
@@ -49,38 +79,34 @@ def main():
     if not os.path.isdir(config['data_path']):
         raise FileNotFoundError(f"COCO data_path not found: {config['data_path']}")
 
-    # 用过滤后的数据集
     train_dataset = FilteredCOCOAdversarialDataset(
         root=config['data_path'],
         ann_file=ann_file,
         transform=transforms.ToTensor(),
-        categories=config.get('categories', None),
+        categories=categories,
+        filter_classes=custom_label_ids,
         max_samples=config.get('max_samples', None)
     )
-
-
     dataloader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
-        #num_workers=0,
         collate_fn=collate_fn
     )
 
     trainer = AdversarialTrainer(model, detector, optimizer, config, device=device)
+
     for epoch in range(config['epochs']):
         loss = trainer.train_epoch(dataloader)
         print(f"Epoch {epoch + 1}/{config['epochs']}, Loss: {loss:.4f}")
-
-        # === 可视化三图对比示例（每个epoch展示一组样本，实际使用时请按自身数据获取方式调整） ===
-        # 获取一组示例图片
         try:
             sample_data = next(iter(dataloader))
-            clean_img = sample_data[0][0]  # 假设batch第一个为原图
-            # 下面两步需你按实际生成方式替换
-            adv_img = clean_img.clone()  # TODO: 换成真实对抗样本
-            patched_img = clean_img.clone()  # TODO: 换成真实补丁图
-            plot_threeway_comparison(clean_img, adv_img, patched_img, save_path=f"compare_epoch{epoch+1}.png")
+            clean_img = sample_data[0][0]
+            adv_img = trainer.generate_adversarial_example(clean_img.unsqueeze(0)).squeeze(0)
+            patched_img = trainer.generate_patched_example(clean_img.unsqueeze(0)).squeeze(0)
+            plot_threeway_comparison(
+                clean_img, adv_img, patched_img, detector, categories, save_path=f"compare_epoch{epoch+1}.png"
+            )
         except Exception as e:
             print(f"可视化样本失败: {e}")
 
