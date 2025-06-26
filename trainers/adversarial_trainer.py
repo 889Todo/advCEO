@@ -1,5 +1,6 @@
 import torch
-from tqdm import tqdm
+import random
+from utils.patch_fusion import hsv_fusion
 from losses.detection_loss import DetectionLoss
 
 def to_float(val):
@@ -22,7 +23,7 @@ class AdversarialTrainer:
         self.model.train()
         epoch_loss = 0.0
         batch_count = 0
-        for images, targets in tqdm(dataloader, desc="Training"):
+        for images, targets in dataloader:
             images = images.to(self.device)
             for t in targets:
                 t['boxes'] = t['boxes'].to(self.device)
@@ -52,8 +53,55 @@ class AdversarialTrainer:
 
             epoch_loss += to_float(loss)
             batch_count += 1
-            tqdm.write(
-                f"Batch Loss: {to_float(loss):.4f} | MSE: {to_float(loss_mse):.4f} | Adv: {to_float(loss_adv):.4f}"
-            )
 
         return epoch_loss / batch_count if batch_count > 0 else 0.0
+
+    def generate_adversarial_example(self, images, target_class=None, method='pgd'):
+        """
+        生成全图对抗样本
+        """
+        self.model.eval()
+        with torch.no_grad():
+            noise = torch.randn_like(images)
+            timesteps = torch.randint(0, self.config['num_diffusion_steps'], (images.size(0),), device=images.device)
+            noisy_images = self.model.add_noise(images, noise, timesteps)
+            pred_noise = self.model(noisy_images, timesteps)
+            adv_images = (images + 0.1 * pred_noise).clamp(0, 1)
+        return adv_images
+
+    def generate_patched_example(self, images):
+        """
+        生成HSV融合补丁：补丁贴在检测物体表面，内容为原图与对抗噪声的HSV融合
+        """
+        self.model.eval()
+        with torch.no_grad():
+            b, c, h, w = images.shape
+            patched = images.clone()
+            det_results = self.detector(images)
+            boxes_list = det_results['boxes']
+            noise = torch.randn_like(images)
+            timesteps = torch.randint(0, self.config['num_diffusion_steps'], (b,), device=images.device)
+            noisy_images = self.model.add_noise(images, noise, timesteps)
+            pred_noise = self.model(noisy_images, timesteps)
+            # 生成对抗补丁
+            for i in range(b):
+                boxes = boxes_list[i]
+                if boxes.shape[0] == 0:
+                    continue  # 若无目标则跳过
+                idx = random.randint(0, boxes.shape[0]-1)
+                x1, y1, x2, y2 = [int(x.item()) for x in boxes[idx]]
+                bw, bh = x2 - x1, y2 - y1
+                # 补丁为检测框中心1/3区域
+                pw, ph = max(bw // 3, 8), max(bh // 3, 8)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                px1, py1 = max(cx - pw // 2, 0), max(cy - ph // 2, 0)
+                px2, py2 = min(cx + pw // 2, w), min(cy + ph // 2, h)
+                # 原patch和对抗噪声patch
+                img_patch = images[i:i+1, :, py1:py2, px1:px2]
+                noise_patch = pred_noise[i:i+1, :, py1:py2, px1:px2]
+                # 对抗补丁 = img + 噪声，进行HSV融合
+                adv_patch = (img_patch + 0.2 * noise_patch).clamp(0, 1)
+                fused_patch = hsv_fusion(img_patch, adv_patch)
+                # 贴回原图
+                patched[i, :, py1:py2, px1:px2] = fused_patch[0]
+            return patched
