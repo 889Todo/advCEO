@@ -26,6 +26,7 @@ def hsv_fusion(clean_img: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
 
 def rgb_to_hsv(image: torch.Tensor) -> torch.Tensor:
     """RGB转HSV（支持批量处理）"""
+    device = image.device
     image = image.permute(0, 2, 3, 1).cpu().numpy() * 255
     hsv_images = []
     for img in image:
@@ -34,10 +35,11 @@ def rgb_to_hsv(image: torch.Tensor) -> torch.Tensor:
         hsv[..., 0] /= 179.0  # H通道归一化
         hsv[..., 1:] /= 255.0  # S和V通道归一化
         hsv_images.append(hsv)
-    return torch.from_numpy(np.stack(hsv_images)).permute(0, 3, 1, 2).to(image.device)
+    return torch.from_numpy(np.stack(hsv_images)).permute(0, 3, 1, 2).to(device)
 
 def hsv_to_rgb(image: torch.Tensor) -> torch.Tensor:
     """HSV转RGB（支持批量处理）"""
+    device = image.device
     image = image.permute(0, 2, 3, 1).cpu().numpy()
     image[..., 0] *= 179.0  # 恢复H通道
     image[..., 1:] *= 255.0  # 恢复S和V通道
@@ -45,4 +47,4 @@ def hsv_to_rgb(image: torch.Tensor) -> torch.Tensor:
     for hsv in image:
         rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
         rgb_images.append(rgb.astype(np.float32) / 255.0)
-    return torch.from_numpy(np.stack(rgb_images)).permute(0, 3, 1, 2).to(image.device)
+    return torch.from_numpy(np.stack(rgb_images)).permute(0, 3, 1, 2).to(device)
