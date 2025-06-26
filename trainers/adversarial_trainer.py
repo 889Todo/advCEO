@@ -16,6 +16,7 @@ class AdversarialTrainer:
         self.loss_mse = torch.nn.MSELoss()
         self.loss_det = DetectionLoss(target_class_id=self._get_target_class_id()).to(self.device)
 
+
     def _get_target_class_id(self):
         return self.config['cat_id'] if 'cat_id' in self.config else 18
 
